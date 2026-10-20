@@ -60,6 +60,8 @@ const newsItem = {
   additionalProperties: false,
 };
 
+import { attendanceTools } from './rust-only-attendance.ts';
+
 export const rustOnlyTools = [
   {
     name: 'infomentor_get_news',
@@ -133,4 +135,5 @@ export const rustOnlyTools = [
     },
     annotations,
   },
+  ...attendanceTools,
 ];

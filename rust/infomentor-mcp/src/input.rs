@@ -33,6 +33,13 @@ pub struct NewsRequest {
     pub page_size: Option<i64>,
 }
 
+/// The attendance list request, defaults applied.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AttendanceRequest {
+    pub page: i64,
+    pub page_size: i64,
+}
+
 /// `collectRequestSchema`, defaults applied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectRequest {
@@ -224,6 +231,21 @@ pub fn news(arguments: &Map<String, Value>) -> Result<NewsRequest, String> {
 /// The news item request: the news id.
 pub fn news_item(arguments: &Map<String, Value>) -> Result<i64, String> {
     message(arguments)
+}
+
+/// The attendance list request.
+pub fn attendance(arguments: &Map<String, Value>) -> Result<AttendanceRequest, String> {
+    object(
+        arguments,
+        &["page", "pageSize"],
+        |parse, args| AttendanceRequest {
+            page: parse.at("page").int_or(args.get("page"), (1, 100_000), 1),
+            page_size: parse
+                .at("pageSize")
+                .int_or(args.get("pageSize"), (1, 100), 20),
+        },
+        |_| None,
+    )
 }
 
 /// `collectRequestSchema`.
@@ -425,6 +447,28 @@ mod tests {
         assert_eq!(
             news_item(&args(json!({"id": 0}))).unwrap_err(),
             "id: Too small: expected number to be >0"
+        );
+    }
+
+    #[test]
+    fn attendance_requests_are_validated() {
+        assert_eq!(
+            attendance(&args(json!({}))),
+            Ok(AttendanceRequest {
+                page: 1,
+                page_size: 20
+            })
+        );
+        assert_eq!(
+            attendance(&args(json!({"page": 2, "pageSize": 100}))),
+            Ok(AttendanceRequest {
+                page: 2,
+                page_size: 100
+            })
+        );
+        assert_eq!(
+            attendance(&args(json!({"page": 0, "pageSize": 101, "z": 1}))).unwrap_err(),
+            "page: Too small: expected number to be >=1, pageSize: Too big: expected number to be <=100, Unrecognized key: \"z\""
         );
     }
 
