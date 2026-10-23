@@ -437,6 +437,8 @@ test('private login and eleven MCP tools select children and read school data wi
         (await readOnlyClient.listTools()).tools.map((tool) => tool.name).toSorted(),
         [
           'infomentor_collect_updates',
+          'infomentor_get_attendance',
+          'infomentor_get_journal',
           'infomentor_get_message',
           'infomentor_get_messages', 'infomentor_get_news', 'infomentor_get_news_item', // Rust: news
           'infomentor_get_notifications',
@@ -486,7 +488,7 @@ test('private login and eleven MCP tools select children and read school data wi
     server = await serveStdio({ sessionFile: file, allowSetupTools: true, fetch: routes.fetch });
     await client.connect(server.transport);
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 13); // Rust: 11 plus the two Rust-only news tools.
+    assert.equal(tools.length, 15); // Rust: 11 plus news, attendance, and journal.
     assert.ok(tools.every((tool) => tool.outputSchema));
     assert.ok(!tools.some((tool) => tool.name.includes('browser')));
     const loginTool = tools.find((tool) => tool.name === 'infomentor_login');

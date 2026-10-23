@@ -107,6 +107,10 @@ impl Server for InfoMentor {
                 let request = input::attendance(arguments)?;
                 client.attendance(request, signal).await
             }
+            "infomentor_get_journal" => {
+                let request = input::journal(arguments)?;
+                client.journal(request, signal).await
+            }
             "infomentor_collect_updates" => {
                 let request = input::collect(arguments)?;
                 client.collect(request, signal).await
@@ -168,10 +172,11 @@ mod tests {
                 "infomentor_get_news",
                 "infomentor_get_news_item",
                 "infomentor_get_attendance",
+                "infomentor_get_journal",
                 "infomentor_collect_updates",
             ]
         );
-        assert_eq!(names(true).len(), 14);
+        assert_eq!(names(true).len(), 15);
         assert!(names(true).ends_with(&SETUP_TOOLS.map(String::from)));
     }
 }

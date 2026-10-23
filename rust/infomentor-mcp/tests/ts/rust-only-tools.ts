@@ -61,6 +61,7 @@ const newsItem = {
 };
 
 import { attendanceTools } from './rust-only-attendance.ts';
+import { journalTools } from './rust-only-journal.ts';
 
 export const rustOnlyTools = [
   {
@@ -136,4 +137,5 @@ export const rustOnlyTools = [
     annotations,
   },
   ...attendanceTools,
+  ...journalTools,
 ];
