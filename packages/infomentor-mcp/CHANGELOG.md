@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New read-only tool `infomentor_get_attendance_app_data` reads action URL paths
+  and top-level boolean permission flags from the attendance module's app data.
+  It does not register, change, or excuse absences.
+
 - New read-only tools `infomentor_get_news` and `infomentor_get_news_item` read
   the selected child's school news posts, such as weekly letters, from
   InfoMentor's `Communication/News/GetNewsList`. Bodies are returned as plain
