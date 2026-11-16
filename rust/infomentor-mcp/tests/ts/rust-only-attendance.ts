@@ -1,6 +1,6 @@
-// Documented Rust-only surface: the read-only attendance tool has no TypeScript counterpart, since
-// the TypeScript server is frozen for retirement. surface.ts splices it into src/surface.json and
-// parity.ts compares it on the Rust side only.
+// Documented Rust-only surface: the read-only attendance tools have no TypeScript counterpart,
+// since the TypeScript server is frozen for retirement. surface.ts splices them into
+// src/surface.json and parity.ts compares them on the Rust side only.
 const $schema = 'https://json-schema.org/draft/2020-12/schema';
 const integer = { type: 'integer', minimum: -9007199254740991, maximum: 9007199254740991 };
 const count = { type: 'integer', minimum: 0, maximum: 9007199254740991 };
@@ -69,6 +69,45 @@ export const attendanceTools = [
         retrievedAt,
       },
       required: ['attendance', 'page', 'pageSize', 'totalItems', 'more', 'skipped', 'retrievedAt'],
+      $schema,
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'infomentor_get_attendance_app_data',
+    description:
+      'Read action names and URL paths, and top-level boolean permission flags, from the selected child’s attendance app data. Flags include canRegisterDayAbsence, canRegisterSessionAbsence, absenceTodayLocked, absenceTomorrowLocked, canAddSicknessToday, canAddSicknessTomorrow, and autoConfirmAbsence when InfoMentor sends them, plus any other top-level booleans. This tool only reads. It does not register, change, or excuse absences. Personal data, names, tokens, and cookies are omitted.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      $schema,
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        urls: {
+          type: 'object',
+          propertyNames: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9]{0,63}$' },
+          additionalProperties: { type: 'string' },
+          description:
+            'Action name to a URL path on minn.infomentor.is. Query strings, fragments, and other hosts are omitted.',
+        },
+        flags: {
+          type: 'object',
+          propertyNames: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9]{0,63}$' },
+          additionalProperties: { type: 'boolean' },
+          description: 'Top-level boolean permission flags. Every other field is omitted.',
+        },
+        retrievedAt,
+      },
+      required: ['urls', 'flags', 'retrievedAt'],
       $schema,
       additionalProperties: false,
     },

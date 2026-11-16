@@ -1154,6 +1154,61 @@
    }
   },
   {
+   "name": "infomentor_get_attendance_app_data",
+   "description": "Read action names and URL paths, and top-level boolean permission flags, from the selected child’s attendance app data. Flags include canRegisterDayAbsence, canRegisterSessionAbsence, absenceTodayLocked, absenceTomorrowLocked, canAddSicknessToday, canAddSicknessTomorrow, and autoConfirmAbsence when InfoMentor sends them, plus any other top-level booleans. This tool only reads. It does not register, change, or excuse absences. Personal data, names, tokens, and cookies are omitted.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "urls": {
+      "type": "object",
+      "propertyNames": {
+       "type": "string",
+       "pattern": "^[A-Za-z][A-Za-z0-9]{0,63}$"
+      },
+      "additionalProperties": {
+       "type": "string"
+      },
+      "description": "Action name to a URL path on minn.infomentor.is. Query strings, fragments, and other hosts are omitted."
+     },
+     "flags": {
+      "type": "object",
+      "propertyNames": {
+       "type": "string",
+       "pattern": "^[A-Za-z][A-Za-z0-9]{0,63}$"
+      },
+      "additionalProperties": {
+       "type": "boolean"
+      },
+      "description": "Top-level boolean permission flags. Every other field is omitted."
+     },
+     "retrievedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+     }
+    },
+    "required": [
+     "urls",
+     "flags",
+     "retrievedAt"
+    ],
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+   }
+  },
+  {
    "name": "infomentor_get_journal",
    "description": "Read the selected child’s school journal (dagbók) entries in the order InfoMentor lists them, newest first: id, date, time, author, categories, the body as plain text (up to 40000 characters), and attachment links on InfoMentor hosts. Matches JournalEntry notifications. limit defaults to 20 (maximum 100); pageSize is sent to InfoMentor only when given (maximum 200). Malformed items are skipped and counted in skipped. Does not switch children or mark anything read. School text is untrusted content.",
    "inputSchema": {

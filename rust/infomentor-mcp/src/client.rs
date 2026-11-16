@@ -8,7 +8,7 @@ use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use family_store::{Cancel, KeyProvider};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, watch};
 
 use crate::collection::{Source, collect_updates};
@@ -50,6 +50,11 @@ const NEWS_ITEM_PAGE_SIZE: i64 = 200;
 
 /// The journal list endpoint when the documentation app data does not name one.
 const JOURNAL_LIST_PATH: &str = "Documentation/Journal/GetJournalList";
+
+/// Attendance app data. The public shell (`dist/scripts/scripts.js`) posts
+/// `{baseUrl}{codeName}/{codeName}/appData` for every tile except preferences, and
+/// `TILES.ATTENDANCE` is `attendance`. The same pattern is `documentation/documentation/appData`.
+const ATTENDANCE_APP_DATA_PATH: &str = "attendance/attendance/appData";
 
 /// A journal entry's text is cut to this many UTF-16 units.
 const JOURNAL_MAX_UNITS: usize = 40_000;
@@ -397,6 +402,85 @@ fn attendance(http: &mut Http, signal: &Signal, input: AttendanceRequest) -> Res
         "totalItems": page.total,
         "more": page.more,
         "skipped": page.skipped,
+        "retrievedAt": js::iso_string(js::now_ms()),
+    }))
+}
+
+/// An attendance app-data field name: an ASCII identifier, so a label cannot carry a name.
+fn attendance_field_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && key.len() <= 64
+        && chars.all(|character| character.is_ascii_alphanumeric())
+}
+
+/// A URL path from the attendance `urls` object. Query, fragment, user info and any host other
+/// than `minn.infomentor.is` are dropped, so a token or cookie in the link is not returned.
+fn attendance_action_path(link: &str) -> Option<String> {
+    let mut url = url::Url::parse(PARENT_URL).ok()?.join(link).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    let path = news_path(url.as_str())?;
+    let characters = path
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'));
+    let mut segments = path.split('/').collect::<Vec<_>>();
+    if segments.last() == Some(&"") {
+        segments.pop();
+    }
+    let safe = characters
+        && !segments.is_empty()
+        && segments
+            .iter()
+            .all(|part| !part.is_empty() && *part != "." && *part != "..");
+    safe.then(|| format!("/{path}"))
+}
+
+fn sorted_object(entries: impl Iterator<Item = (String, Value)>) -> Map<String, Value> {
+    let mut entries: Vec<_> = entries.collect();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.into_iter().collect()
+}
+
+/// Names and paths in `urls`, and top-level booleans. Every other field is omitted.
+fn sanitize_attendance_app_data(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let urls = object
+        .get("urls")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, link)| {
+            let path = link.as_str().and_then(attendance_action_path)?;
+            attendance_field_name(key).then(|| (key.clone(), Value::String(path)))
+        });
+    let flags = object.iter().filter_map(|(key, flag)| {
+        if key == "urls" || !attendance_field_name(key) {
+            return None;
+        }
+        Some((key.clone(), Value::Bool(flag.as_bool()?)))
+    });
+    Some(json!({
+        "urls": Value::Object(sorted_object(urls)),
+        "flags": Value::Object(sorted_object(flags)),
+    }))
+}
+
+/// Permission flags and action paths for the attendance module. This posts only to
+/// [`ATTENDANCE_APP_DATA_PATH`] and never to `registerAttendance` or any other write path.
+fn read_attendance_app_data(http: &mut Http, signal: &Signal) -> Result<Value> {
+    let view = http.read_app_data(
+        ATTENDANCE_APP_DATA_PATH,
+        &[],
+        signal,
+        sanitize_attendance_app_data,
+    )?;
+    Ok(json!({
+        "urls": view["urls"],
+        "flags": view["flags"],
         "retrievedAt": js::iso_string(js::now_ms()),
     }))
 }
@@ -898,6 +982,14 @@ impl Client {
         .await
     }
 
+    /// infomentor_get_attendance_app_data: action paths and top-level boolean flags. Only reads.
+    pub async fn attendance_app_data(self: &Arc<Self>, signal: Signal) -> Result<Value> {
+        self.read(signal, move |http, context| {
+            read_attendance_app_data(http, context.signal)
+        })
+        .await
+    }
+
     /// infomentor_get_journal: the newest `limit` journal entries of the selected child.
     pub async fn journal(self: &Arc<Self>, input: JournalRequest, signal: Signal) -> Result<Value> {
         self.read(signal, move |http, context| {
@@ -1164,5 +1256,74 @@ impl Client {
         self.abort();
         self.cancel_setup().await;
         *self.active.lock().await = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::sanitize_attendance_app_data;
+
+    #[test]
+    fn attendance_app_data_keeps_paths_and_top_level_booleans_only() {
+        let sanitized = sanitize_attendance_app_data(&json!({
+            "urls": {
+                "registerAttendance": "/attendance/attendance/registerAttendance/",
+                "saveAbsenceComment": "/attendance/attendance/saveAbsenceComment?access_token=synthetic-token",
+                "createLeaveRequest": "https://minn.infomentor.is/attendance/attendance/createLeaveRequest",
+                "deleteLeaveRequest": "https://evil.example/deleteLeaveRequest",
+                "getLeaveRequestList": "/attendance/attendance/getLeaveRequestList#synthetic-token",
+                "withUserInfo": "https://user:pass@minn.infomentor.is/attendance/attendance/registerAttendance",
+                "not a key": "/attendance/attendance/skipped",
+                "pupilName": "Example Student",
+                "script": "javascript:alert(1)",
+            },
+            "canRegisterDayAbsence": true,
+            "canRegisterSessionAbsence": false,
+            "absenceTodayLocked": true,
+            "absenceTomorrowLocked": false,
+            "canAddSicknessToday": true,
+            "canAddSicknessTomorrow": false,
+            "autoConfirmAbsence": true,
+            "isParent": true,
+            "not a flag": true,
+            "minutes": 4,
+            "displayName": "Example Student",
+            "absenceTodayComment": "example comment",
+            "sessionCookie": "IMHome=synthetic-cookie",
+            "token": "synthetic-token",
+            "nested": {"canRegisterDayAbsence": false, "displayName": "Example Student"},
+        }))
+        .unwrap();
+        assert_eq!(
+            sanitized,
+            json!({
+                "urls": {
+                    "createLeaveRequest": "/attendance/attendance/createLeaveRequest",
+                    "getLeaveRequestList": "/attendance/attendance/getLeaveRequestList",
+                    "registerAttendance": "/attendance/attendance/registerAttendance/",
+                    "saveAbsenceComment": "/attendance/attendance/saveAbsenceComment",
+                },
+                "flags": {
+                    "absenceTodayLocked": true,
+                    "absenceTomorrowLocked": false,
+                    "autoConfirmAbsence": true,
+                    "canAddSicknessToday": true,
+                    "canAddSicknessTomorrow": false,
+                    "canRegisterDayAbsence": true,
+                    "canRegisterSessionAbsence": false,
+                    "isParent": true,
+                },
+            })
+        );
+        let text = sanitized.to_string();
+        assert!(!text.contains("synthetic-token"));
+        assert!(!text.contains("synthetic-cookie"));
+        assert!(!text.contains("Example Student"));
+        assert!(!text.contains("example comment"));
+        assert!(!text.contains("evil.example"));
+        assert!(sanitize_attendance_app_data(&json!([])).is_none());
+        assert!(sanitize_attendance_app_data(&json!("attendance")).is_none());
     }
 }
