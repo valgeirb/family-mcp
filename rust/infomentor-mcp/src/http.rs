@@ -215,6 +215,43 @@ impl Http {
         signal: &Signal,
         source: &str,
     ) -> Result<Page> {
+        self.exchange(value, fields.map(form_body), false, signal, source)
+    }
+
+    /// `postJSON` / `fetchById` from `dist/scripts/scripts.js`: a JSON POST. An empty `body` is
+    /// the script passing `undefined` to `JSON.stringify`, which sends no payload.
+    pub fn read_json<T>(
+        &mut self,
+        path: &str,
+        body: &str,
+        signal: &Signal,
+        shape: impl FnOnce(&Value) -> Option<T>,
+    ) -> Result<T> {
+        let page = self.exchange(
+            &format!("{PARENT_URL}{path}"),
+            Some(body.to_owned()),
+            true,
+            signal,
+            PARENT_URL,
+        )?;
+        require_school_page(&page)?;
+        js::parse(&page.text)
+            .as_ref()
+            .and_then(shape)
+            .ok_or(Fail::new(
+                Code::UnexpectedPage,
+                "InfoMentor school data is unavailable or its format has changed.",
+            ))
+    }
+
+    fn exchange(
+        &mut self,
+        value: &str,
+        body: Option<String>,
+        json: bool,
+        signal: &Signal,
+        source: &str,
+    ) -> Result<Page> {
         let now = js::now_ms();
 
         if now < self.cooldown_until {
@@ -229,10 +266,9 @@ impl Http {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         let request_signal = signal.any(&Signal::timeout(REQUEST_TIMEOUT));
         let url = trusted_url(value)?;
-        let body = fields.map(form_body);
         let previous = trusted_url(source)?;
 
-        match self.hops(url, body, previous, &request_signal) {
+        match self.hops(url, body, previous, &request_signal, json) {
             Ok(page) => Ok(page),
             Err(_) if signal.aborted() => Err(CANCELLED),
             Err(Stop::Fail(fail @ Fail::Im { .. })) => Err(fail),
@@ -259,6 +295,7 @@ impl Http {
         mut body: Option<String>,
         mut previous: Url,
         signal: &Signal,
+        json: bool,
     ) -> std::result::Result<Page, Stop> {
         let mut redirect_status = None;
         for _ in 0..10 {
@@ -278,7 +315,14 @@ impl Http {
             }
 
             if body.is_some() {
-                set(CONTENT_TYPE, "application/x-www-form-urlencoded")?;
+                set(
+                    CONTENT_TYPE,
+                    if json {
+                        "application/json; charset=utf-8"
+                    } else {
+                        "application/x-www-form-urlencoded"
+                    },
+                )?;
                 set(ORIGIN, &origin(&previous))?;
             }
             let response = self

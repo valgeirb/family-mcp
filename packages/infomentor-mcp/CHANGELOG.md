@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- New read-only tools `infomentor_list_learning_units`, `infomentor_get_learning_unit`,
+  and `infomentor_get_assessments` read learning units (námslotur) and assessments
+  (námsmat) for the selected child. Bodies are plain text. Nothing is saved,
+  submitted, or marked read. The signed-in response shapes are unverified.
+
 - New read-only tool `infomentor_get_attendance_app_data` reads action URL paths
   and top-level boolean permission flags from the attendance module's app data.
   It does not register, change, or excuse absences.

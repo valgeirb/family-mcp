@@ -65,6 +65,12 @@
         "infomentor_get_notifications",
         "infomentor_get_news",
         "infomentor_get_news_item",
+        "infomentor_get_attendance",
+        "infomentor_get_attendance_app_data",
+        "infomentor_get_journal",
+        "infomentor_list_learning_units",
+        "infomentor_get_learning_unit",
+        "infomentor_get_assessments",
         "infomentor_collect_updates"
       ],
       "extraFiles": [
