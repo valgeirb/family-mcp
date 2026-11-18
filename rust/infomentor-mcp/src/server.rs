@@ -111,6 +111,18 @@ impl Server for InfoMentor {
                 let request = input::journal(arguments)?;
                 client.journal(request, signal).await
             }
+            "infomentor_list_learning_units" => {
+                input::empty(arguments)?;
+                client.learning_units(signal).await
+            }
+            "infomentor_get_learning_unit" => {
+                let id = input::learning_unit(arguments)?;
+                client.learning_unit(id, signal).await
+            }
+            "infomentor_get_assessments" => {
+                let id = input::assessments(arguments)?;
+                client.assessments(id, signal).await
+            }
             "infomentor_get_attendance_app_data" => {
                 input::empty(arguments)?;
                 client.attendance_app_data(signal).await
@@ -178,10 +190,13 @@ mod tests {
                 "infomentor_get_attendance",
                 "infomentor_get_attendance_app_data",
                 "infomentor_get_journal",
+                "infomentor_list_learning_units",
+                "infomentor_get_learning_unit",
+                "infomentor_get_assessments",
                 "infomentor_collect_updates",
             ]
         );
-        assert_eq!(names(true).len(), 16);
+        assert_eq!(names(true).len(), 19);
         assert!(names(true).ends_with(&SETUP_TOOLS.map(String::from)));
     }
 }

@@ -302,6 +302,9 @@ deliberately.
 | `infomentor_get_news`          | Read the selected child's school news posts as plain text. Optional `limit` (default 20, maximum 100) and `pageSize` (sent only when given, maximum 200).                                                    |
 | `infomentor_get_news_item`     | Read one whole news post using its numeric `id` from the news list.                                                                                                                                          |
 | `infomentor_get_attendance_app_data` | Read attendance action URL paths and top-level boolean permission flags for the selected child. Only reads; it does not register, change, or excuse absences. |
+| `infomentor_list_learning_units` | Read the selected child's learning units (námslotur): id, title, subjects, and a description when one is sent. |
+| `infomentor_get_learning_unit` | Read one learning unit by numeric `id`: title, subjects, period or dates, and the description, goals, and criteria as plain text. |
+| `infomentor_get_assessments` | Read assessments (námsmat). Optional `id` is one subject; otherwise every subject. Each row has subject, title, date, result, and text. |
 | `infomentor_collect_updates`   | Check all children, timetables, full inbox/sent messages, and notifications. Pass the last handled `cursor` for changes only; see scheduled checks below.                                                    |
 | `infomentor_login`             | Opt-in. Sign in with injected secrets or `credentialsFile` (stored for renewal), or import with `importFile`. `allowAccountChange` replaces another account's session. `timeoutSeconds` 1–3600, default 300. |
 | `infomentor_setup_status`      | Opt-in. Read setup progress or the final result.                                                                                                                                                             |

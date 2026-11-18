@@ -59,6 +59,34 @@ const ATTENDANCE_APP_DATA_PATH: &str = "attendance/attendance/appData";
 /// A journal entry's text is cut to this many UTF-16 units.
 const JOURNAL_MAX_UNITS: usize = 40_000;
 
+/// Learning units (námslotur) and assessments (námsmat). Unverified signed-in: the paths below
+/// come from the public shell, not from a signed-in response.
+///
+/// `https://minn.infomentor.is/dist/scripts/scripts.js` (Last-Modified: Mon, 27 Apr 2026
+/// 09:47:52 GMT), fetched 2026-11-18. `TILES.UOL_V2` is `"uolv2"` and `TILES.ASSESSMENT_V2` is
+/// `"assessmentv2"`. Opening a tile posts `{baseUrl}{codeName}/{codeName}/appData` (`loadView`,
+/// `type:"POST"`), the same call as `attendance/attendance/appData`.
+///
+/// `#/uolv2/show/<id>` is the route `openUol` handles. It calls `curriedPostJSON(urls.getUol)`
+/// with `{id}`. `postJSON` is `POST` `application/json; charset=utf-8` and `JSON.stringify` of
+/// that object. The list on first open is the `uols` array of the app-data payload. `urls.getUols`
+/// is only the academic-year refresh (`{academicYearId, stateFilter}`) and is not called here,
+/// so a filter is not invented. `urls.persistFilter` and timeline posts are writes and are not
+/// called.
+///
+/// `#/assessmentv2/show/<id>` selects that subject. The statement list is `fetchById(urls.getGridItems + "/")`
+/// of `{gridId}?academicYearId={selected academicYearItems[].key}` (`fetchById` is `postJSON(url + suffix)`
+/// with an undefined body). A subject with no grids uses `urls.getUolItems` the same way. Fields
+/// shown by `dist/html/apps/assessmentv2/assessmentv2.statementItem.html`: `headerLabel`, `text`,
+/// `markLastUpdated`, `markTextValue` / `markNumericValue`. `urls.updateNotificationState` marks
+/// notifications read and is not called.
+const LEARNING_APP_DATA: &str = "uolv2/uolv2/appData";
+
+const ASSESSMENT_APP_DATA: &str = "assessmentv2/assessmentv2/appData";
+
+/// Plain text cut to the same cap as a journal entry.
+const STUDY_MAX_UNITS: usize = JOURNAL_MAX_UNITS;
+
 /// `SessionOptions`.
 #[derive(Default, Clone)]
 pub struct Options {
@@ -597,6 +625,654 @@ fn journal_output(item: &Value) -> Value {
     output
 }
 
+const UNEXPECTED_SCHOOL: Fail = Fail::new(
+    Code::UnexpectedPage,
+    "InfoMentor school data is unavailable or its format has changed.",
+);
+
+/// A 404 from one of these reads names what was missing. Any other failure is unchanged.
+fn missing_page(fail: Fail, message: &'static str) -> Fail {
+    match fail {
+        Fail::Im {
+            http_status: Some(404),
+            ..
+        } => fail.rewrap(message),
+        other => other,
+    }
+}
+
+fn school_object(http: &mut Http, signal: &Signal, path: &str) -> Result<Value> {
+    http.read_app_data(path, &[], signal, |value| {
+        value.as_object().is_some().then(|| value.clone())
+    })
+}
+
+fn json_object(value: &Value) -> Option<Value> {
+    value.as_object().is_some().then(|| value.clone())
+}
+
+/// A path from an app-data `urls` field, on this host, with no query or fragment.
+fn study_path(data: &Value, key: &str) -> Option<String> {
+    data.get("urls")?.get(key)?.as_str().and_then(news_path)
+}
+
+fn cap_study(text: String) -> (String, bool) {
+    let truncated = js::units(&text) > STUDY_MAX_UNITS;
+    (
+        js::slice_units(&text, STUDY_MAX_UNITS).to_owned(),
+        truncated,
+    )
+}
+
+/// HTML as plain text. `None` when the field is present and not a string.
+fn html_plain(value: Option<&Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Null) => Some(String::new()),
+        Some(Value::String(text)) => Some(html::plain_text(text)),
+        Some(_) => None,
+    }
+}
+
+fn array_of<'a>(value: &'a Value, key: &str) -> Option<Option<&'a Vec<Value>>> {
+    match value.get(key) {
+        None => Some(None),
+        Some(Value::Array(items)) => Some(Some(items)),
+        Some(_) => None,
+    }
+}
+
+fn push_line(lines: &mut Vec<String>, line: String) {
+    if !line.is_empty() {
+        lines.push(line);
+    }
+}
+
+fn labeled(label: String, value: String) -> String {
+    match label.is_empty() {
+        true => value,
+        false => format!("{label}: {value}"),
+    }
+}
+
+fn same_id(value: Option<&Value>, id: i64) -> bool {
+    match value {
+        Some(Value::Number(number)) => number.as_i64() == Some(id),
+        Some(Value::String(text)) => text == &id.to_string(),
+        _ => false,
+    }
+}
+
+fn catalog_name(catalog: &[Value], id: i64) -> Option<String> {
+    let name = js::trim(
+        catalog
+            .iter()
+            .find(|subject| same_id(subject.get("id"), id))?
+            .get("name")?
+            .as_str()?,
+    );
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// One subject name. `Ok(None)` skips an id the catalog does not name.
+fn one_subject(item: &Value, catalog: &[Value]) -> Option<Option<String>> {
+    if let Some(text) = item.as_str() {
+        let text = js::trim(text);
+        return Some((!text.is_empty()).then(|| text.to_owned()));
+    }
+
+    if let Some(id) = item.as_i64() {
+        return Some(catalog_name(catalog, id));
+    }
+    let object = item.as_object()?;
+
+    if let Some(name) = object.get("name").and_then(Value::as_str) {
+        let name = js::trim(name);
+
+        if !name.is_empty() {
+            return Some(Some(name.to_owned()));
+        }
+    }
+    let id = object.get("id")?.as_i64()?;
+    Some(catalog_name(catalog, id))
+}
+
+fn subject_names(value: &Value, catalog: &[Value]) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+
+    for item in value.as_array()? {
+        if let Some(name) = one_subject(item, catalog)? {
+            names.push(name);
+        }
+    }
+    Some(names)
+}
+
+fn catalog_of(data: &Value) -> &[Value] {
+    data.get("subjects")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+/// An overview label that names the unit's period or dates. The label text is the school's.
+fn is_period_label(label: &str) -> bool {
+    let label = label.to_lowercase();
+    ["period", "tímabil", "tidsperiod", "dagsetning", "datum"]
+        .iter()
+        .any(|needle| label.contains(needle))
+        || label == "date"
+        || label == "dates"
+        || label.starts_with("date ")
+        || label.starts_with("dates ")
+}
+
+fn dated_period(object: &Map<String, Value>) -> Option<String> {
+    let text = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(js::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    match (text("startDate"), text("endDate")) {
+        (Some(start), Some(end)) => Some(format!("{start}–{end}")),
+        (Some(start), None) => Some(start),
+        (None, Some(end)) => Some(end),
+        (None, None) => text("period"),
+    }
+}
+
+fn push_overview(
+    section: &Value,
+    description: &mut Vec<String>,
+    period: &mut Vec<String>,
+) -> Option<()> {
+    let Some(rows) = array_of(section, "overview")? else {
+        return Some(());
+    };
+    let mut lines = Vec::new();
+
+    for row in rows {
+        let label = html_plain(row.get("label"))?;
+        let value = html_plain(row.get("value"))?;
+
+        if label.is_empty() && value.is_empty() {
+            continue;
+        }
+
+        if is_period_label(&label) && !value.is_empty() {
+            period.push(value.clone());
+        }
+        lines.push(labeled(label, value));
+    }
+
+    if !lines.is_empty() {
+        description.push(lines.join("\n"));
+    }
+    Some(())
+}
+
+fn push_syllabus(section: &Value, goals: &mut Vec<String>) -> Option<()> {
+    let Some(blocks) = array_of(section, "sections")? else {
+        return Some(());
+    };
+
+    for block in blocks {
+        let mut lines = Vec::new();
+        push_line(&mut lines, html_plain(block.get("title"))?);
+        let fields = array_of(block, "fields")?.map(Vec::as_slice).unwrap_or(&[]);
+
+        for field in fields {
+            let label = html_plain(field.get("label"))?;
+            let value = html_plain(field.get("value"))?;
+
+            if label.is_empty() && value.is_empty() {
+                continue;
+            }
+            lines.push(labeled(label, value));
+        }
+
+        if !lines.is_empty() {
+            goals.push(lines.join("\n"));
+        }
+    }
+    Some(())
+}
+
+fn push_objectives(section: &Value, goals: &mut Vec<String>) -> Option<()> {
+    let Some(items) = array_of(section, "objectives")? else {
+        return Some(());
+    };
+    let mut lines = Vec::new();
+
+    for item in items {
+        push_line(&mut lines, html_plain(Some(item))?);
+    }
+
+    if !lines.is_empty() {
+        goals.push(lines.join("\n"));
+    }
+    Some(())
+}
+
+fn statement_line(statement: &Value) -> Option<String> {
+    let header = html_plain(statement.get("levelHeader"))?;
+    let text = html_plain(statement.get("text"))?;
+    Some(match (header.is_empty(), text.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => header,
+        (true, false) => text,
+        (false, false) => format!("{header}: {text}"),
+    })
+}
+
+fn push_layers(statement: &Value, lines: &mut Vec<String>) -> Option<()> {
+    let Some(layers) = array_of(statement, "layers")? else {
+        return Some(());
+    };
+
+    for layer in layers {
+        let title = html_plain(layer.get("title"))?;
+        let text = html_plain(layer.get("freeText"))?;
+        push_line(
+            lines,
+            match (title.is_empty(), text.is_empty()) {
+                (true, true) => String::new(),
+                (false, true) => title,
+                (true, false) => text,
+                (false, false) => format!("{title}: {text}"),
+            },
+        );
+    }
+    Some(())
+}
+
+fn push_statements(section: &Value, criteria: &mut Vec<String>) -> Option<()> {
+    let Some(kinds) = array_of(section, "matrixTypes")? else {
+        return Some(());
+    };
+    let mut lines = Vec::new();
+
+    for kind in kinds {
+        push_line(&mut lines, html_plain(kind.get("title"))?);
+        let matrices = array_of(kind, "matrices")?
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+
+        for matrix in matrices {
+            push_line(&mut lines, html_plain(matrix.get("title"))?);
+            let statements = array_of(matrix, "statements")?
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+
+            for statement in statements {
+                push_line(&mut lines, statement_line(statement)?);
+                push_layers(statement, &mut lines)?;
+                let grouped = array_of(statement, "groupedStatements")?
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+
+                for item in grouped {
+                    push_line(&mut lines, statement_line(item)?);
+                    push_layers(item, &mut lines)?;
+                }
+            }
+        }
+    }
+
+    if !lines.is_empty() {
+        criteria.push(lines.join("\n"));
+    }
+    Some(())
+}
+
+fn learning_list_item(value: &Value, catalog: &[Value]) -> Option<Value> {
+    let id = value.get("id")?.as_i64()?;
+    let title = js::trim(value.get("title")?.as_str()?).to_owned();
+
+    if title.is_empty() {
+        return None;
+    }
+    let subjects = match value.get("subjects") {
+        None => Vec::new(),
+        Some(subjects) => subject_names(subjects, catalog)?,
+    };
+    let description = match value.get("description") {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::String(text)) => Value::String(cap_study(html::plain_text(text)).0),
+        Some(_) => return None,
+    };
+    Some(json!({
+        "id": id,
+        "title": title,
+        "subjects": subjects,
+        "description": description,
+    }))
+}
+
+/// The unit the detail template shows: title, subjects, period, and the overview, syllabus,
+/// objectives, and statements as plain text. Other section types (timeline, tasks, resources)
+/// are not the requested text, and timeline posting is a write.
+fn learning_unit_fields(id: i64, value: &Value, catalog: &[Value]) -> Option<Value> {
+    let object = value.as_object()?;
+
+    if object.contains_key("id") && !same_id(object.get("id"), id) {
+        return None;
+    }
+    let title = js::trim(object.get("title")?.as_str()?).to_owned();
+
+    if title.is_empty() {
+        return None;
+    }
+    let subjects = match object.get("subjects") {
+        None => Vec::new(),
+        Some(subjects) => subject_names(subjects, catalog)?,
+    };
+    let sections = match object.get("sections") {
+        None => &[][..],
+        Some(Value::Array(items)) => items.as_slice(),
+        Some(_) => return None,
+    };
+    let mut description = Vec::new();
+    let mut goals = Vec::new();
+    let mut criteria = Vec::new();
+    let mut period = Vec::new();
+
+    for section in sections {
+        let heading = html_plain(section.get("title"))?;
+        match section.get("type")?.as_str()? {
+            "uol" => {
+                push_line(&mut description, heading);
+                push_overview(section, &mut description, &mut period)?;
+            }
+            "syllabus" => {
+                push_line(&mut goals, heading);
+                push_syllabus(section, &mut goals)?;
+            }
+            "objective" => {
+                push_line(&mut goals, heading);
+                push_objectives(section, &mut goals)?;
+            }
+            "statement" => {
+                push_line(&mut criteria, heading);
+                push_statements(section, &mut criteria)?;
+            }
+            _ => {}
+        }
+    }
+
+    if period.is_empty() {
+        if let Some(text) = dated_period(object) {
+            period.push(text);
+        }
+    }
+    let (description, description_cut) = cap_study(description.join("\n\n"));
+    let (goals, goals_cut) = cap_study(goals.join("\n\n"));
+    let (criteria, criteria_cut) = cap_study(criteria.join("\n\n"));
+    let (period, period_cut) = match period.is_empty() {
+        true => (Value::Null, false),
+        false => {
+            let (text, cut) = cap_study(period.join("\n"));
+            (Value::String(text), cut)
+        }
+    };
+    Some(json!({
+        "id": id,
+        "title": title,
+        "subjects": subjects,
+        "period": period,
+        "description": description,
+        "goals": goals,
+        "criteria": criteria,
+        "truncated": description_cut || goals_cut || criteria_cut || period_cut,
+    }))
+}
+
+fn list_learning_units(http: &mut Http, signal: &Signal) -> Result<Value> {
+    let data = school_object(http, signal, LEARNING_APP_DATA)
+        .map_err(|fail| missing_page(fail, "InfoMentor did not return the learning units."))?;
+    let units = data
+        .get("uols")
+        .and_then(Value::as_array)
+        .ok_or(UNEXPECTED_SCHOOL)?;
+    let catalog = catalog_of(&data);
+    let mut shown = Vec::new();
+    let mut skipped = 0;
+
+    for unit in units {
+        match learning_list_item(unit, catalog) {
+            Some(unit) => shown.push(unit),
+            None => skipped += 1,
+        }
+    }
+    Ok(json!({
+        "units": shown,
+        "skipped": skipped,
+        "retrievedAt": js::iso_string(js::now_ms()),
+    }))
+}
+
+fn learning_unit(http: &mut Http, signal: &Signal, id: i64) -> Result<Value> {
+    let data = school_object(http, signal, LEARNING_APP_DATA)
+        .map_err(|fail| missing_page(fail, "InfoMentor did not return the learning units."))?;
+    let path = study_path(&data, "getUol").ok_or(Fail::new(
+        Code::UnexpectedPage,
+        "InfoMentor did not name a learning-unit address.",
+    ))?;
+    let detail = http
+        .read_json(&path, &json!({"id": id}).to_string(), signal, json_object)
+        .map_err(|fail| missing_page(fail, "InfoMentor did not return this learning unit."))?;
+    let unit = learning_unit_fields(id, &detail, catalog_of(&data)).ok_or(UNEXPECTED_SCHOOL)?;
+    Ok(json!({
+        "unit": unit,
+        "retrievedAt": js::iso_string(js::now_ms()),
+    }))
+}
+
+struct SubjectPlan {
+    id: i64,
+    title: String,
+    grids: Vec<i64>,
+    uols: Vec<i64>,
+}
+
+fn linked_ids(subject: &Value, key: &str) -> Option<Vec<i64>> {
+    match array_of(subject, key)? {
+        None => Some(Vec::new()),
+        Some(items) => items
+            .iter()
+            .map(|item| item.as_i64().or_else(|| item.get("id")?.as_i64()))
+            .collect(),
+    }
+}
+
+fn subject_plan(subject: &Value) -> Option<SubjectPlan> {
+    let title = js::trim(subject.get("title")?.as_str()?).to_owned();
+
+    if title.is_empty() {
+        return None;
+    }
+    Some(SubjectPlan {
+        id: subject.get("id")?.as_i64()?,
+        title,
+        grids: linked_ids(subject, "linkedGrids")?,
+        uols: linked_ids(subject, "linkedUols")?,
+    })
+}
+
+fn selected_year(data: &Value) -> Option<String> {
+    let selected = data
+        .get("academicYearItems")?
+        .as_array()?
+        .iter()
+        .find(|item| item.get("selected").and_then(Value::as_bool) == Some(true))?;
+    match selected.get("key")? {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Number(number) => number.as_i64().map(|number| number.to_string()),
+        _ => None,
+    }
+}
+
+fn assessment_result(item: &Value) -> Option<Option<String>> {
+    if let Some(text) = item.get("markTextValue") {
+        match text {
+            Value::Null => {}
+            Value::String(text) => {
+                let text = js::trim(text);
+
+                if !text.is_empty() {
+                    return Some(Some(text.to_owned()));
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(match item.get("markNumericValue") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            let text = js::trim(text);
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        Some(Value::Number(number)) => Some(number.to_string()),
+        Some(_) => return None,
+    })
+}
+
+fn statement_row(subject: &str, item: &Value) -> Option<Value> {
+    let id = item.get("id")?.as_i64()?;
+    let title = html_plain(item.get("headerLabel"))?;
+    let (text, truncated) = cap_study(html_plain(item.get("text"))?);
+    let date = match item.get("markLastUpdated") {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::String(text)) => Value::String(text.clone()),
+        Some(_) => return None,
+    };
+    Some(json!({
+        "id": id,
+        "subject": subject,
+        "title": title,
+        "date": date,
+        "result": assessment_result(item)?,
+        "text": text,
+        "textTruncated": truncated,
+    }))
+}
+
+fn subject_row(plan: &SubjectPlan) -> Value {
+    json!({
+        "id": plan.id,
+        "subject": plan.title,
+        "title": plan.title,
+        "date": Value::Null,
+        "result": Value::Null,
+        "text": "",
+        "textTruncated": false,
+    })
+}
+
+fn statement_page(
+    http: &mut Http,
+    signal: &Signal,
+    path: &str,
+    id: i64,
+    year: &str,
+    subject: &str,
+) -> Result<(Vec<Value>, usize)> {
+    let target = format!(
+        "{}/{id}?academicYearId={}",
+        path.trim_end_matches('/'),
+        js::encode_query(year)
+    );
+    let page = http
+        .read_json(&target, "", signal, json_object)
+        .map_err(|fail| missing_page(fail, "InfoMentor did not return this assessment."))?;
+    let items = page
+        .get("statementItemsList")
+        .and_then(Value::as_array)
+        .ok_or(UNEXPECTED_SCHOOL)?;
+    let mut rows = Vec::new();
+    let mut skipped = 0;
+
+    for item in items {
+        match statement_row(subject, item) {
+            Some(row) => rows.push(row),
+            None => skipped += 1,
+        }
+    }
+    Ok((rows, skipped))
+}
+
+fn assessments(http: &mut Http, signal: &Signal, id: Option<i64>) -> Result<Value> {
+    let data = school_object(http, signal, ASSESSMENT_APP_DATA)
+        .map_err(|fail| missing_page(fail, "InfoMentor did not return the assessments."))?;
+    let subjects = data
+        .get("navigationModel")
+        .and_then(|model| model.get("navigationItemsList"))
+        .and_then(Value::as_array)
+        .ok_or(UNEXPECTED_SCHOOL)?;
+    let mut plans = Vec::new();
+    let mut skipped = 0;
+
+    for subject in subjects {
+        match subject_plan(subject) {
+            Some(plan) => plans.push(plan),
+            None => skipped += 1,
+        }
+    }
+
+    if let Some(id) = id
+        && !plans.iter().any(|plan| plan.id == id)
+    {
+        return Err(Fail::config(
+            "This assessment is not in the current list. Use an id from infomentor_get_assessments.",
+        ));
+    }
+    let mut rows = Vec::new();
+
+    for plan in plans
+        .iter()
+        .filter(|plan| id.is_none_or(|id| plan.id == id))
+    {
+        let (kind, ids) = match plan.grids.is_empty() {
+            false => ("getGridItems", plan.grids.as_slice()),
+            true => ("getUolItems", plan.uols.as_slice()),
+        };
+
+        if ids.is_empty() {
+            rows.push(subject_row(plan));
+            continue;
+        }
+        let path = study_path(&data, kind).ok_or(Fail::new(
+            Code::UnexpectedPage,
+            "InfoMentor did not name an assessment address.",
+        ))?;
+        let year = selected_year(&data).ok_or(Fail::new(
+            Code::UnexpectedPage,
+            "InfoMentor did not name the assessment year.",
+        ))?;
+        let mut found = Vec::new();
+
+        for item in ids {
+            let (page, page_skipped) =
+                statement_page(http, signal, &path, *item, &year, &plan.title)?;
+            skipped += page_skipped;
+            found.extend(page);
+        }
+
+        if found.is_empty() {
+            rows.push(subject_row(plan));
+        } else {
+            rows.extend(found);
+        }
+    }
+    Ok(json!({
+        "assessments": rows,
+        "skipped": skipped,
+        "retrievedAt": js::iso_string(js::now_ms()),
+    }))
+}
+
 fn text<'v>(value: &'v Value, key: &str) -> &'v str {
     value[key].as_str().unwrap_or_default()
 }
@@ -990,6 +1666,30 @@ impl Client {
         .await
     }
 
+    /// infomentor_list_learning_units: the learning units the app data lists for the selected child.
+    pub async fn learning_units(self: &Arc<Self>, signal: Signal) -> Result<Value> {
+        self.read(signal, move |http, context| {
+            list_learning_units(http, context.signal)
+        })
+        .await
+    }
+
+    /// infomentor_get_learning_unit: one learning unit, its text as plain text.
+    pub async fn learning_unit(self: &Arc<Self>, id: i64, signal: Signal) -> Result<Value> {
+        self.read(signal, move |http, context| {
+            learning_unit(http, context.signal, id)
+        })
+        .await
+    }
+
+    /// infomentor_get_assessments: assessment statements for every subject, or one subject.
+    pub async fn assessments(self: &Arc<Self>, id: Option<i64>, signal: Signal) -> Result<Value> {
+        self.read(signal, move |http, context| {
+            assessments(http, context.signal, id)
+        })
+        .await
+    }
+
     /// infomentor_get_journal: the newest `limit` journal entries of the selected child.
     pub async fn journal(self: &Arc<Self>, input: JournalRequest, signal: Signal) -> Result<Value> {
         self.read(signal, move |http, context| {
@@ -1263,7 +1963,9 @@ impl Client {
 mod tests {
     use serde_json::json;
 
-    use super::sanitize_attendance_app_data;
+    use super::{
+        learning_list_item, learning_unit_fields, sanitize_attendance_app_data, statement_row,
+    };
 
     #[test]
     fn attendance_app_data_keeps_paths_and_top_level_booleans_only() {
@@ -1325,5 +2027,97 @@ mod tests {
         assert!(!text.contains("evil.example"));
         assert!(sanitize_attendance_app_data(&json!([])).is_none());
         assert!(sanitize_attendance_app_data(&json!("attendance")).is_none());
+    }
+
+    #[test]
+    fn learning_unit_text_is_plain_and_drops_timeline() {
+        let catalog = json!([{"id": 4, "name": "Synthetic subject"}]);
+        let unit = learning_unit_fields(
+            1_000_001,
+            &json!({
+                "id": 1000001,
+                "title": " Synthetic unit ",
+                "subjects": [4, {"name": "Named"}],
+                "sections": [
+                    {"type": "uol", "title": "About", "overview": [
+                        {"label": "Lýsing", "value": "<p>Learn <b>this</b>.</p>"},
+                        {"label": "Tímabil", "value": "1.1.2026–1.6.2026"}
+                    ]},
+                    {"type": "syllabus", "sections": [
+                        {"title": "Goals", "fields": [{"label": "Aim", "value": "<p>Read</p>"}]}
+                    ]},
+                    {"type": "objective", "objectives": ["<p>Count</p>"]},
+                    {"type": "statement", "matrixTypes": [{
+                        "title": "Criteria",
+                        "matrices": [{"title": "Level", "statements": [{
+                            "text": "<p>Explain</p>",
+                            "levelHeader": "A",
+                            "groupedStatements": [],
+                            "layers": [{"title": "Layer", "freeText": "<p>More</p>"}]
+                        }]}]
+                    }]},
+                    {"type": "timeline", "entries": [{"text": "not included"}]}
+                ]
+            }),
+            catalog.as_array().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            unit,
+            json!({
+                "id": 1000001,
+                "title": "Synthetic unit",
+                "subjects": ["Synthetic subject", "Named"],
+                "period": "1.1.2026–1.6.2026",
+                "description": "About\n\nLýsing: Learn this.\nTímabil: 1.1.2026–1.6.2026",
+                "goals": "Goals\nAim: Read\n\nCount",
+                "criteria": "Criteria\nLevel\nA: Explain\nLayer: More",
+                "truncated": false,
+            })
+        );
+        assert!(learning_unit_fields(1, &json!({"title": "x", "id": 2}), &[]).is_none());
+        assert!(learning_unit_fields(1, &json!({"id": 1, "sections": {}}), &[]).is_none());
+        let listed = learning_list_item(
+            &json!({"id": 7, "title": "Unit", "subjects": [4], "description": "<p>Short</p>"}),
+            catalog.as_array().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(listed["description"], "Short");
+        assert_eq!(listed["subjects"], json!(["Synthetic subject"]));
+        assert!(learning_list_item(&json!({"id": "no", "title": "x"}), &[]).is_none());
+    }
+
+    #[test]
+    fn assessment_rows_keep_the_mark_and_drop_a_bad_statement() {
+        let row = statement_row(
+            "Synthetic subject",
+            &json!({
+                "id": 8,
+                "headerLabel": "Synthetic mark",
+                "text": "<p>Did <b>well</b>.</p>",
+                "markLastUpdated": "01.02.2026",
+                "markTextValue": "A",
+                "markNumericValue": 4
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            row,
+            json!({
+                "id": 8,
+                "subject": "Synthetic subject",
+                "title": "Synthetic mark",
+                "date": "01.02.2026",
+                "result": "A",
+                "text": "Did well.",
+                "textTruncated": false,
+            })
+        );
+        assert_eq!(
+            statement_row("S", &json!({"id": 1, "markNumericValue": 4})).unwrap()["result"],
+            json!("4")
+        );
+        assert!(statement_row("S", &json!({"id": "bad"})).is_none());
+        assert!(statement_row("S", &json!({"id": 1, "markTextValue": 1})).is_none());
     }
 }

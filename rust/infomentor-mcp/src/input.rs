@@ -257,6 +257,24 @@ pub fn attendance(arguments: &Map<String, Value>) -> Result<AttendanceRequest, S
     )
 }
 
+/// The learning-unit request: the unit id.
+pub fn learning_unit(arguments: &Map<String, Value>) -> Result<i64, String> {
+    message(arguments)
+}
+
+/// The assessment request: an optional subject id.
+pub fn assessments(arguments: &Map<String, Value>) -> Result<Option<i64>, String> {
+    object(
+        arguments,
+        &["id"],
+        |parse, args| match args.get("id") {
+            None => None,
+            value => parse.at("id").int(value, Min::Positive, None),
+        },
+        |_| None,
+    )
+}
+
 /// The journal list request.
 pub fn journal(arguments: &Map<String, Value>) -> Result<JournalRequest, String> {
     object(
@@ -516,6 +534,21 @@ mod tests {
         assert_eq!(
             journal(&args(json!({"limit": 0, "pageSize": 201, "z": 1}))).unwrap_err(),
             "limit: Too small: expected number to be >=1, pageSize: Too big: expected number to be <=200, Unrecognized key: \"z\""
+        );
+    }
+
+    #[test]
+    fn learning_and_assessment_requests_are_validated() {
+        assert_eq!(learning_unit(&args(json!({"id": 1000001}))), Ok(1_000_001));
+        assert_eq!(
+            learning_unit(&args(json!({"id": 0}))).unwrap_err(),
+            "id: Too small: expected number to be >0"
+        );
+        assert_eq!(assessments(&args(json!({}))), Ok(None));
+        assert_eq!(assessments(&args(json!({"id": 3}))), Ok(Some(3)));
+        assert_eq!(
+            assessments(&args(json!({"id": -1, "z": 1}))).unwrap_err(),
+            "id: Too small: expected number to be >0, Unrecognized key: \"z\""
         );
     }
 
