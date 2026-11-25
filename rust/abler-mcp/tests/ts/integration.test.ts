@@ -69,7 +69,7 @@ const requestBodySchema = z.object({
     first: z.number().optional(),
     cursor: z.string().nullable().optional(),
     filter: z
-      .object({ participant: z.array(z.string()).optional() })
+      .object({ playerIds: z.array(z.string()).optional() })
       .passthrough()
       .optional(),
   }),
@@ -458,15 +458,15 @@ test('private cookie import, renewal, pagination, validation, and safe failures'
 
       if (body.operationName === 'Schedule') {
         expect(body.variables.filter).toEqual({
-          dateFrom: '2026-09-11',
-          dateTo: '2026-09-30',
-          label: ['TRAINING'],
+          timeAfter: '2026-09-11T00:00:00.000Z',
+          timeBefore: '2026-09-30T23:59:59.999Z',
+          eventTypes: ['TRAINING'],
         });
 
         return Response.json({
           data: {
             schedule: {
-              edges: [{ node: { ...eventBase, eventId: body.variables.cursor || 'one' } }],
+              page: [{ ...eventBase, eventId: body.variables.cursor || 'one' }],
               pageInfo: { hasNextPage: !body.variables.cursor, endCursor: 'opaque-next' },
             },
           },
@@ -996,7 +996,7 @@ test('all eight Abler tools complete MCP round trips with optional and null upst
         return Response.json({
           data: {
             schedule: {
-              edges: [{ node: event }],
+              page: [event],
               pageInfo: { hasNextPage: false, endCursor: null },
             },
           },
@@ -1296,9 +1296,9 @@ test('child schedules separate siblings by ID, retain empty children, and pagina
         });
       expect(body.operationName).toBe('Schedule');
       expect(body.variables.first).toBe(1);
-      assert(body.variables.filter?.participant);
-      expect(body.variables.filter.participant).toHaveLength(1);
-      const child = body.variables.filter.participant[0];
+      assert(body.variables.filter?.playerIds);
+      expect(body.variables.filter.playerIds).toHaveLength(1);
+      const child = body.variables.filter.playerIds[0];
       const cursor = body.variables.cursor;
       assert(child && cursor !== undefined);
       requests.push({ child, cursor });
@@ -1306,19 +1306,17 @@ test('child schedules separate siblings by ID, retain empty children, and pagina
       return Response.json({
         data: {
           schedule: {
-            edges:
+            page:
               child === 'child-c'
                 ? []
                 : [
                     {
-                      node: {
-                        ...eventBase,
-                        eventId: cursor ? 'next-event' : 'shared-event',
-                        currentPlayerAttendance: [
-                          { player: linkedChildren[0], status: 'G', coachStatus: 'P' },
-                          { player: linkedChildren[1], status: 'N', coachStatus: null },
-                        ],
-                      },
+                      ...eventBase,
+                      eventId: cursor ? 'next-event' : 'shared-event',
+                      currentPlayerAttendance: [
+                        { player: linkedChildren[0], status: 'G', coachStatus: 'P' },
+                        { player: linkedChildren[1], status: 'N', coachStatus: null },
+                      ],
                     },
                   ],
             pageInfo: {
@@ -1536,7 +1534,12 @@ test('unsafe session files, malformed pages, stalled cursors, and wrong events f
     let page: TestPage = { edges: [], pageInfo: { hasNextPage: true, endCursor: null } };
 
     const client = new AblerClient(path, async () =>
-      Response.json({ data: { schedule: page, event: page } }),
+      Response.json({
+        data: {
+          schedule: { page: page.edges.map((edge) => edge.node), pageInfo: page.pageInfo },
+          event: page,
+        },
+      }),
     );
 
     await assert.rejects(client.schedule());

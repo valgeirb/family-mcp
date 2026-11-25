@@ -41,6 +41,21 @@ const EVENT_FIELDS: &str = "
   currentPlayerAttendance { status coachStatus player { id displayName } }
 ";
 
+/// Abler replaced `schedule` with `scheduleV2` (November 2026): a `page` list of a union, the
+/// event id as `id`, and attendance under `participation`. Aliases keep the old event shape.
+/// Abler allows at most three aliases per query; this uses all three with `schedule:`.
+const EVENT_V2_FIELDS: &str = "
+  ... on GenericEventInterface {
+    eventId: id name type description from to status arrivalTime
+    locationDetails locationAddress locationLink
+    ageGroup { id name }
+    groups { id name }
+    currentPlayerAttendance: participation(segment: QUERY_PARTICIPANTS, roles: [PLAYER]) {
+      ... on EventPlayer { status coachStatus player { id displayName } }
+    }
+  }
+";
+
 const MESSAGE_FIELDS: &str = "
   id messageBody createdAt
   creator { id displayName }
@@ -230,6 +245,23 @@ fn page_of(node: &S, value: Option<&Value>) -> Result<UpstreamPage> {
         page_info,
         end_cursor,
     })
+}
+
+/// A `scheduleV2` page as the edges `page_of` reads; any other shape is `None`, to fail there.
+fn as_edges(value: Option<&Value>) -> Option<Value> {
+    let Some(Value::Object(page)) = value else {
+        return None;
+    };
+    let Some(Value::Array(items)) = page.get("page") else {
+        return None;
+    };
+    let mut edges = page.clone();
+    edges.shift_remove("page");
+    edges.insert(
+        "edges".to_owned(),
+        Value::Array(items.iter().map(|node| json!({ "node": node })).collect()),
+    );
+    Some(Value::Object(edges))
 }
 
 impl UpstreamPage {
@@ -663,24 +695,31 @@ impl Client {
     fn schedule_with_session(&self, session: &mut Session, input: &Schedule) -> Result<Value> {
         let mut filter = Map::new();
 
+        // Dates are whole UTC days (Iceland keeps UTC); `to` stays inclusive.
         if let Some(from) = &input.from {
-            filter.insert("dateFrom".to_owned(), json!(from));
+            filter.insert(
+                "timeAfter".to_owned(),
+                json!(format!("{from}T00:00:00.000Z")),
+            );
         }
 
         if let Some(to) = &input.to {
-            filter.insert("dateTo".to_owned(), json!(to));
+            filter.insert(
+                "timeBefore".to_owned(),
+                json!(format!("{to}T23:59:59.999Z")),
+            );
         }
 
         if let Some(types) = &input.types {
-            filter.insert("label".to_owned(), json!(types));
+            filter.insert("eventTypes".to_owned(), json!(types));
         }
 
         if let Some(groups) = &input.group_ids {
-            filter.insert("group".to_owned(), json!(groups));
+            filter.insert("subgroupIds".to_owned(), json!(groups));
         }
 
         if let Some(participants) = &input.participant_ids {
-            filter.insert("participant".to_owned(), json!(participants));
+            filter.insert("playerIds".to_owned(), json!(participants));
         }
         let mut variables = json!({ "first": input.first, "cursor": input.after });
 
@@ -691,14 +730,14 @@ impl Client {
             session,
             "Schedule",
             &format!(
-                "query Schedule($first: Int, $cursor: String, $filter: eventFilter) {{
-      schedule(first: $first, after: $cursor, filter: $filter) {{ edges {{ node {{ {EVENT_FIELDS} }} }} {PAGE_FIELDS} }}
+                "query Schedule($first: Int, $cursor: String, $filter: scheduleV2Filter) {{
+      schedule: scheduleV2(pagination: {{ first: $first, after: $cursor }}, filter: $filter) {{ page {{ {EVENT_V2_FIELDS} }} {PAGE_FIELDS} }}
     }}"
             ),
             variables,
             false,
         )?;
-        let page = page_of(&EVENT, data.get("schedule"))?;
+        let page = page_of(&EVENT, as_edges(data.get("schedule")).as_ref())?;
         page.advanced(input.after.as_deref(), NOT_ADVANCED)?;
 
         Ok(json!({ "events": page.nodes, "pageInfo": page.page_info }))
