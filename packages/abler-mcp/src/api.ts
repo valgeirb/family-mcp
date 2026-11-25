@@ -165,6 +165,21 @@ const eventFields = `
 
 const pageFields = `pageInfo { hasNextPage endCursor }`;
 
+// Abler replaced `schedule` with `scheduleV2` (November 2026): a `page` list of a union, the
+// event id as `id`, and attendance under `participation`. Aliases keep the old event shape.
+// Abler allows at most three aliases per query; this uses all three with `schedule:`.
+const eventV2Fields = `
+  ... on GenericEventInterface {
+    eventId: id name type description from to status arrivalTime
+    locationDetails locationAddress locationLink
+    ageGroup { id name }
+    groups { id name }
+    currentPlayerAttendance: participation(segment: QUERY_PARTICIPANTS, roles: [PLAYER]) {
+      ... on EventPlayer { status coachStatus player { id displayName } }
+    }
+  }
+`;
+
 const pageOf = <T extends z.ZodType>(node: T) =>
   z
     .object({
@@ -180,6 +195,20 @@ const pageOf = <T extends z.ZodType>(node: T) =>
     );
 
 const pageSchema = pageOf(eventSchema);
+
+/** `scheduleV2` lists its events in `page` instead of edges; the cursor rule is the same. */
+const scheduleV2PageSchema = z
+  .object({
+    page: z.array(eventSchema),
+    pageInfo: z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() }),
+  })
+  .refine(
+    (page) =>
+      !page.pageInfo.hasNextPage || (page.page.length > 0 && Boolean(page.pageInfo.endCursor)),
+    {
+      message: 'Abler returned an incomplete pagination cursor.',
+    },
+  );
 
 export const scheduleResultSchema = z.object({
   events: z.array(eventSchema),
@@ -536,15 +565,16 @@ export class AblerClient {
 
     const filter: Record<string, string | string[]> = {};
 
-    if (from) filter.dateFrom = from;
+    // Dates are whole UTC days (Iceland keeps UTC); `to` stays inclusive.
+    if (from) filter.timeAfter = `${from}T00:00:00.000Z`;
 
-    if (to) filter.dateTo = to;
+    if (to) filter.timeBefore = `${to}T23:59:59.999Z`;
 
-    if (types) filter.label = types;
+    if (types) filter.eventTypes = types;
 
-    if (groupIds) filter.group = groupIds;
+    if (groupIds) filter.subgroupIds = groupIds;
 
-    if (participantIds) filter.participant = participantIds;
+    if (participantIds) filter.playerIds = participantIds;
 
     const variables = {
       first,
@@ -556,13 +586,13 @@ export class AblerClient {
     const data = await this.query(
       session,
       'Schedule',
-      `query Schedule($first: Int, $cursor: String, $filter: eventFilter) {
-      schedule(first: $first, after: $cursor, filter: $filter) { edges { node { ${eventFields} } } ${pageFields} }
+      `query Schedule($first: Int, $cursor: String, $filter: scheduleV2Filter) {
+      schedule: scheduleV2(pagination: { first: $first, after: $cursor }, filter: $filter) { page { ${eventV2Fields} } ${pageFields} }
     }`,
       variables,
     );
 
-    const page = pageSchema.parse(data.schedule);
+    const page = scheduleV2PageSchema.parse(data.schedule);
 
     if (page.pageInfo.hasNextPage && page.pageInfo.endCursor === after) {
       throw new SafeError(
@@ -571,7 +601,7 @@ export class AblerClient {
     }
 
     return scheduleResultSchema.parse({
-      events: page.edges.map((e) => e.node),
+      events: page.page,
       pageInfo: page.pageInfo,
     });
   }

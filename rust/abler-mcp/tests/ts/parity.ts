@@ -130,8 +130,8 @@ function data(operation: string, variables: Record<string, unknown>): unknown {
       };
     case 'Schedule': {
       const cursor = variables.cursor as string | null;
-      const filter = variables.filter as { participant?: string[] } | undefined;
-      const participant = filter?.participant?.[0];
+      const filter = variables.filter as { playerIds?: string[] } | undefined;
+      const participant = filter?.playerIds?.[0];
       const all = cursor === null ? [event('e1', ['c1', '2']), event('e2', ['c1'])] : [event('e3', ['2'])];
       const events = all.filter((e) => !participant || e.currentPlayerAttendance.some((a) => a.player.id === participant));
       const pageInfo =
@@ -143,7 +143,7 @@ function data(operation: string, variables: Record<string, unknown>): unknown {
               ? { hasNextPage: true, endCursor: 'n1' }
               : { hasNextPage: false, endCursor: null };
 
-      return { schedule: { edges: events.map((node) => ({ node, cursor: 'x' })), pageInfo } };
+      return { schedule: { page: events, pageInfo } };
     }
     case 'Event': {
       const edges =
